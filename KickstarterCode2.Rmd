@@ -1,0 +1,504 @@
+---
+title: "KickstarterCode2"
+author: "tova simonson"
+date: "3/14/2019"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval=FALSE)
+```
+
+```{r}
+###   KICKSTARTER CODE  ###
+
+#load libraries
+library(tidyverse)
+library(readr)
+library(car)
+library(fastDummies)
+library(data.table)
+library(ggplot2)
+library(MASS)
+library(caret)
+library(rpart)
+library(pROC)
+library(countrycode)
+
+#DATA EXPLORING AND CLEANING
+kickstarter18<-  read_csv("kickstarter-projects/ks-projects-201801.csv")  #read in data
+kickstarter18$launch_date<- as.Date(kickstarter18$launched)
+kickstarter18$duration_days <-kickstarter18$deadline - kickstarter18$launch_date
+kickstarter18$duration_days<- as.numeric(kickstarter18$duration_days)
+kickstarter18$state <- ifelse(kickstarter18$state== 'canceled', 'failed', kickstarter18$state)
+C1 <- kickstarter18 %>%
+  group_by(ID) %>%
+  filter((!(backers == 0 & state== "successful")) &  (country!='N,0"' ) & ((state=="successful") | (state=="failed")) & (duration_days<100))
+C1$result <- ifelse(C1$state == "successful", 1, 0)
+C1$goal_per_day <- C1$usd_goal_real/C1$duration_days
+C1$usd_goal_real <- log(C1$usd_goal_real + 1)
+C1$goal_per_day <- log(C1$goal_per_day + 1)
+C1$difference <- C1$usd_goal_real - C1$usd_pledged_real
+C1$country[which(C1$country == "GB")] = "United Kingdom"
+C1$country[which(C1$country == "US")] = "United States"
+C1$country[which(C1$country == "CA")] = "Canada"
+C1$country[which(C1$country == "AU")] = "Australia"
+C1$country[which(C1$country == "NO")] = "Norway"
+C1$country[which(C1$country == "IT")] = "Italy"
+C1$country[which(C1$country == "DE")] = "Germany"
+C1$country[which(C1$country == "IE")] = "Ireland"
+C1$country[which(C1$country == "MX")] = "Mexico"
+C1$country[which(C1$country == "ES")] = "Spain"
+C1$country[which(C1$country == "SE")] = "Sweden"
+C1$country[which(C1$country == "FR")] = "France"
+C1$country[which(C1$country == "NL")] = "Netherlands"
+C1$country[which(C1$country == "NZ")] = "New Zealand"
+C1$country[which(C1$country == "CH")] = "China"
+C1$country[which(C1$country == "AT")] = "Austria"
+C1$country[which(C1$country == "BE")] = "Belgium"
+C1$country[which(C1$country == "DK")] = "Denmark"
+C1$country[which(C1$country == "HK")] = "Hong Kong"
+C1$country[which(C1$country == "LU")] = "Luxembourg"
+C1$country[which(C1$country == "SG")] = "Singapore"
+C1$country[which(C1$country == "JP")] = "Japan"
+region <- data.frame(C1$country)
+
+region$continent <- countrycode(sourcevar = region[, "C1.country"],
+                                origin = "country.name",
+                                destination = "continent")
+C1$continent <- region$continent
+C1 = data.table(C1)
+C2 = C1[,!c('ID','name','category','currency','launched','pledged','state','backers','usd pledged','country')]
+month = C2[, .(launch_date,deadline)]
+month[, lm := month(launch_date)][, dm := month(deadline)][,ly:= year(launch_date)][,dy:=year(deadline)]
+for(i in seq(1:12)) {
+  month[((ly == dy) & (i>=lm) & (i<=dm)),  `:=` (month.name[i],1)]
+  month[((ly!=dy) & ((i>=lm) | (i<=dm))), month.name[i] := 1]
+}
+yr_list = sort(unique(c(month$ly,month$dy)))
+str_yr_list = paste('y', as.character(yr_list), sep = "")
+for( i in seq(1,length(yr_list))) {
+  month[((yr_list[i] == ly)|(yr_list[i] == dy)), `:=`(str_yr_list[i],1)]
+}
+month[is.na(month)] <- 0
+C3 = cbind(C2, month[,-c("launch_date","deadline","lm","dm","ly","dy")])
+class_df <- C3[,!c('deadline','goal','usd_pledged_real','difference','launch_date')]
+
+
+
+#exploratory -- CONTINENT
+res_df = class_df[,.(res = sum(result)/.N), by=continent][order(-res)]
+barplot(res_df$res, names.arg = res_df$continent)
+res_df
+
+#exploratory -- MAIN CATEGORY
+grp = class_df[,.N,by = main_category]
+grp
+barplot(grp$N, names.arg = grp$main_category)
+res_df = class_df[,.(res = sum(result)/.N), by=main_category][order(-res)]
+barplot(res_df$res, names.arg = res_df$main_category)
+
+
+hist((class_df$usd_goal_real))
+hist(log(class_df$usd_goal_real))
+hist(kickstarter18$duration_days)
+hist(class_df$duration_days)
+hist((class_df$goal_per_day))
+hist(log(class_df$goal_per_day))
+```
+
+
+```{r}
+#LOGISTIC
+
+#full model
+full <- glm(result~., data=class_df, family=binomial)
+summary(full)
+
+#stepwise
+step <- full %>% stepAIC(trace = FALSE) 
+summary(step)
+
+#assumption check with selected stepwise model
+model <- glm(result ~ main_category + duration_days + 
+               goal_per_day + usd_goal_real+ continent + January + February + March + April + 
+               June + July + August + September + November + December + 
+               y2009 + y2010 + y2011 + y2012 + y2013 + y2014 + y2015 + y2017 + 
+               y2018, family = binomial, data = class_df)
+summary(model) #all variables significant
+vif(model)  #assumption check - dropped usd_goal_real because multicollinear with goal_per_day 
+model <- glm(result ~ main_category + duration_days + 
+               goal_per_day + continent + January + February + March + April + 
+               June + July + August + September + November + December + 
+               y2009 + y2010 + y2011 + y2012 + y2013 + y2014 + y2015 + y2017 + 
+               y2018, family = binomial, data = class_df)
+summary(model) #all variables significant
+vif(model)  #no VIF above 3 now
+which(abs(residuals.glm(model,type = "deviance")) >= 3)   # no outliers (ajit 162)
+
+
+
+#CROSS VALIDATION FUNCTION
+CVInd <- function(n,K) {  #n is sample size; K is number of parts; returns K-length list of indices for each part
+  m<-floor(n/K)  #approximate size of each part
+  r<-n-m*K  
+  I<-sample(n,n)  #random reordering of the indices
+  Ind<-list()  #will be list of indices for all K parts
+  length(Ind)<-K
+  for (k in 1:K) {
+    if (k <= r) kpart <- ((m+1)*(k-1)+1):((m+1)*k)  
+    else kpart<-((m+1)*r+m*(k-r-1)+1):((m+1)*r+m*(k-r))
+    Ind[[k]] <- I[kpart]  #indices for kth part of data
+  }
+  Ind
+}
+
+
+#CV for logistic best model. 
+
+Nrep <- 20
+K <- 10
+n <- nrow(class_df)
+y1 = class_df$result
+yhat <- matrix(0, n, 1)
+misclass <- matrix(0, Nrep, 1)
+for (j in 1:Nrep) {
+  Ind <- CVInd(n, K)
+  for (k in 1:K) {
+    out<-glm(result ~ main_category + duration_days + goal_per_day + continent + January + February + March + April + June + July + August +  September + November + December +  y2009 + y2010 + y2011 + y2012 + y2013 + y2014 + y2015 + y2017 + y2018, class_df[-Ind[[k]],],family=binomial(link="logit"))
+    phat<-as.numeric(predict(out,class_df[Ind[[k]],],type="response"));  yhat[Ind[[k]],1]<-as.numeric(phat >= 0.5)   
+  }
+  misclass[j, ] <- apply(yhat, 2, function (x) sum(as.numeric(y1) != x) / length(y1))
+}
+# misclass
+misclassAv <- apply(misclass, 2, mean); misclassAv
+
+
+#ROC
+library(pROC)
+x=plot.roc(class_df$result, model$fitted.values, xlab="Specificity", print.auc=TRUE) #roc curve with AUC
+
+#METRICS
+#preds is a vector of prediction probabilities
+preds=predict(model, class_df, type="response")
+classes = rep(0,nrow(class_df))
+classes[preds>0.5] = 1
+conf_matrix = table(class_df$result,classes)
+specificity=conf_matrix[1,1]/sum(conf_matrix[1,])
+specificity
+sensitivity = conf_matrix[2,2]/sum(conf_matrix[2,])
+sensitivity
+precision = conf_matrix[2,2]/sum(conf_matrix[,2])
+precision
+recall = conf_matrix[2,2]/sum(conf_matrix[2,])
+recall
+fscore = (2*precision*recall)/(precision + recall)
+fscore
+```
+
+
+```{r}
+#####  GB TREE #####
+
+#Libraries needed
+library(xgboost)
+library(Matrix)
+library(DiagrammeR)
+library(nnet)
+library(ALEPlot)
+#set main_category and continent as factors
+class_df$main_category = as.factor(class_df$main_category)
+class_df$continent = as.factor(class_df$continent)
+#create sparse matrix of features and a numeric  vector of results
+sparse_matrix = sparse.model.matrix(result~.-1, data = class_df)
+output_vector = as.numeric(class_df$result)
+#CV to find the best value of nrounds
+xgcv_auc_error = xgb.cv(data = sparse_matrix, label = output_vector, max.depth = 6,
+                        eta = 0.02, nrounds = 3000,objective = "binary:logistic", nfold= 5, eval.metric = "auc",eval.metric = "error")
+#identify best nrounds
+eval_log = data.table(xgcv_auc_error$evaluation_log)
+head(eval_log[order(-test_auc_mean)],1)
+head(eval_log[order(test_error_mean)],1)
+#nrounds vs CV AUC
+plot(xgcv_auc_error$evaluation_log$test_auc_mean, ylab = "Model AUC", xlab="iteration")
+#nrounds vs CV error
+plot(xgcv_auc_error$evaluation_log$test_error_mean, ylab = "Model misclass error", xlab="iteration")
+#best nrounds is around 1750 where model AUC is about 73% and misclass rate of 31%
+#Fit optimal model
+xg_mod = xgboost(data = sparse_matrix , label = output_vector, max.depth = 6,eta = 0.02, nrounds = 1750,
+                 objective = "binary:logistic", verbose = 0)
+importance <- xgb.importance(feature_names = sparse_matrix@Dimnames[[2]], model = xg_mod)
+importance
+#Model evaluation metrics
+class_xgbMat <- xgb.DMatrix(data = as.matrix(sparse_matrix))
+preds = predict(xg_mod, class_xgbMat)
+#Model evaluation metrics
+classes = rep(0,nrow(class_df))
+classes[preds>0.5] = 1
+table(classes)
+conf_matrix = table(class_df$result,classes)
+specificity=conf_matrix[1,1]/sum(conf_matrix[1,])
+specificity
+sensitivity = conf_matrix[2,2]/sum(conf_matrix[2,])
+sensitivity
+precision = conf_matrix[2,2]/sum(conf_matrix[,2])
+precision
+recall = conf_matrix[2,2]/sum(conf_matrix[2,])
+recall
+fscore = (2*precision*recall)/(precision + recall)
+fscore
+#ALE plots
+yhat <- function(X.model, newdata) as.numeric(predict(X.model, xgb.DMatrix(data = as.matrix(sparse.model.matrix(result~.-1, data = newdata)))))
+par(mfrow=c(2,4))
+for (j in c(2:3,5))  {ALEPlot(class_df, xg_mod, pred.fun=yhat, J=j, K=50, NA.plot = TRUE)
+  rug(class_df[,j]) }  
+par(mfrow=c(1,1))
+#Interaction plots
+par(mfrow=c(2,2))
+ALEPlot(class_df, xg_mod, pred.fun=yhat, J=c(3,5), K=50, NA.plot = TRUE)
+ALEPlot(class_df, xg_mod, pred.fun=yhat, J=c(2,5), K=50, NA.plot = TRUE)
+par(mfrow=c(2,2))
+ALEPlot(class_df, xg_mod, pred.fun=yhat, J=c(3,5), K=50, NA.plot = TRUE)
+```
+
+
+
+
+
+
+```{r}
+#####   Fitting Random Forest   #######
+
+##Split into 70-30 train test
+##Trying a number of models to tune parameters
+##Number of trees -500, Number of random variables at each split - 5
+#str(class_df)
+set.seed(100)
+train <- sample(nrow(class_df), 0.7*nrow(class_df), replace = FALSE)
+TrainSet <- class_df[train,]
+ValidSet <- class_df[-train,]
+
+model1 <- randomForest(result ~ ., data = TrainSet, importance = TRUE)
+model1
+
+# Predicting on Validation set
+predValid <- predict(model1, ValidSet, type = "class")
+predictor <- as.numeric(predict(model1, ValidSet, type = "prob")[,2])
+#pred <- as.numeric(predict(model1, ValidSet, type = "prob")[,1])
+# Checking classification accuracy
+mean(predValid == ValidSet$result)                    
+table(predValid,ValidSet$result)
+
+# To check important variables
+importance(model1)        
+varImpPlot(model1) 
+
+#Plot the random forest
+plot(model1)
+
+#Plotting an ROC-AUC Curve
+plot.roc(ValidSet$result, predictor , xlab="Specificity", print.auc=TRUE)
+plot.roc(ValidSet$result, pred , xlab="Specificity", print.auc=TRUE)
+
+
+##Number of trees - 500, Number of random variables at each split - 3
+model2 <- randomForest(result ~ ., data = TrainSet,mtry=3, ntree = 500, nodesize = 3, importance = TRUE)
+model2
+
+# Predicting on Validation set
+predValid2 <- predict(model2, ValidSet, type = "class")
+# Checking classification accuracy
+mean(predValid2 == ValidSet$result)                    
+table(predValid2,ValidSet$result)
+
+# To check important variables
+importance(model2)        
+varImpPlot(model2)       
+
+
+
+##Number of trees - 500, Number of random variables at each split - 4
+model3 <- randomForest(result ~ ., data = TrainSet,mtry=4, ntree = 500, nodesize = 3, importance = TRUE)
+model3
+plot(model3)
+# Predicting on Validation set
+predValid3 <- predict(model3, ValidSet, type = "class")
+# Checking classification accuracy
+mean(predValid3 == ValidSet$result)                    
+table(predValid3,ValidSet$result)
+
+# To check important variables
+importance(model3)        
+varImpPlot(model3)       
+
+
+##Number of trees - 500, Number of random variables at each split - 10
+model3 <- randomForest(result ~ ., data = TrainSet,mtry=10, ntree = 500, nodesize = 3, importance = TRUE)
+model3
+plot(model3)
+# Predicting on Validation set
+predValid3 <- as.numeric(predict(model3, ValidSet, type = "prob")[,2])
+# Checking classification accuracy
+mean(predValid3 == ValidSet$result)                    
+table(predValid3,ValidSet$result)
+
+# To check important variables
+importance(model3)        
+varImpPlot(model3)       
+
+#Plot the random forest
+plot(model3)
+
+#Plotting an ROC-AUC Curve
+plot.roc(ValidSet$result, predValid3 , xlab="Specificity", print.auc=TRUE)
+
+##Number of trees - 400, Number of random variables at each split - 6
+model4 <- randomForest(result ~ ., data = TrainSet,mtry=6, ntree = 400, nodesize = 3, importance = TRUE)
+model4
+# Predicting on Validation set
+predValid4 <- as.numeric(predict(model4, ValidSet, type = "prob")[,2])
+# Checking classification accuracy
+mean(predValid4 == ValidSet$result)                    
+table(predValid4,ValidSet$result)
+
+# To check important variables
+importance(model4)        
+varImpPlot(model4)       
+
+#Plot the random forest
+plot(model4)
+
+#Plotting an ROC-AUC Curve
+plot.roc(ValidSet$result, predValid4 , xlab="Specificity", print.auc=TRUE)
+
+
+##Number of trees - 400, Number of random variables at each split - 5
+model4 <- randomForest(result ~ ., data = TrainSet,mtry=5, ntree = 400, nodesize = 3, importance = TRUE)
+model4
+# Predicting on Validation set
+predValid4 <- as.numeric(predict(model4, ValidSet, type = "prob")[,2])
+# Checking classification accuracy
+mean(predValid4 == ValidSet$result)                    
+table(predValid4,ValidSet$result)
+
+# To check important variables
+importance(model4)        
+varImpPlot(model4)       
+
+#Plot the random forest
+plot(model4)
+
+#Plotting an ROC-AUC Curve
+plot.roc(ValidSet$result, predValid4 , xlab="Specificity", print.auc=TRUE)
+
+##Number of trees - 300, Number of random variables at each split - 5
+model5 <- randomForest(result ~ ., data = TrainSet,mtry=5, ntree = 300, nodesize = 3, importance = TRUE)
+model5
+# Predicting on Validation set
+predValid5 <- as.numeric(predict(model5, ValidSet, type = "prob")[,2])
+# Checking classification accuracy
+mean(predValid5 == ValidSet$result)                    
+table(predValid5,ValidSet$result)
+
+# To check important variables
+importance(model5)        
+varImpPlot(model5)       
+
+#Plot the random forest
+plot(model5)
+
+#Plotting an ROC-AUC Curve
+plot.roc(ValidSet$result, predValid5 , xlab="Specificity", print.auc=TRUE)
+
+```
+
+
+
+
+```{r}
+###### NAIVE BAYES #########
+
+
+#Run CV to compare different values of the Laplace Smoother and choose model with smallest CV misclass rate
+
+#Getting started with Naive Bayes
+class_df$result <- as.factor(class_df$result)
+class_dataset=class_df
+set.seed(12345)
+Nrep<-20 #number of replicates of CV
+K<-10  #K-fold CV on each replicate
+n.models = 2
+n=nrow(class_dataset)
+y<-class_dataset$result
+yhat=matrix(0,n,n.models)
+misclass<-matrix(0,Nrep,n.models)
+for (j in 1:Nrep) {
+  Ind<-CVInd(n,K)
+  col <- 1
+  for (k in 1:K) {
+    out=naiveBayes(result ~., data=class_dataset[-Ind[[k]],])
+    yhat <- (predict(out,class_dataset[Ind[[k]],], type = 'class')) #no laplace smoother
+    y <- class_dataset[Ind[[k]],]$result
+    misclass[j,1] <- sum(y != yhat)/length(y)
+    
+    out2=naiveBayes(result ~., data=class_dataset[-Ind[[k]],], laplace = 1)
+    yhat2 <- (predict(out2,class_dataset[Ind[[k]],], type = 'class'))  
+    y2 <- class_dataset[Ind[[k]],]$result
+    misclass[j,2] <- sum(y2 != yhat2)/length(y2)
+  }
+  col <- col + 1
+} #end of j loop
+misclassAv <- apply(misclass, 2, mean)
+minMisClass <- min(misclassAv)
+CCR <- 1 - minMisClass
+minIndex <- which.min(misclassAv)
+
+#Fit Naive Bayes model with best Laplace Smoother value
+#Fitting the Naive Bayes model
+Naive_Bayes_Model=naiveBayes(result ~., data=class_dataset, laplace = 1)
+#What does the model say? Print the model summary
+Naive_Bayes_Model
+
+#Prediction on the dataset
+NB_Predictions=predict(Naive_Bayes_Model,class_dataset)
+#Confusion matrix to check accuracy
+table(NB_Predictions,class_dataset$result)
+
+#Compute confusion matrix and misclass rate of not CV
+confusion_matrix <- table(NB_Predictions,class_dataset$result)
+CCRfinal <- (confusion_matrix[1,1]+confusion_matrix[2,2])/sum(confusion_matrix)
+misclassRateFinal <- 1 - CCR
+
+
+
+#Plot ROC curve and compute AUC
+library(pROC)
+NB_Predictions2=predict(Naive_Bayes_Model,class_dataset, "raw")
+plot.roc(class_dataset$result, NB_Predictions2[,1],xlab="Specificity", print.auc=TRUE)
+#Compute Specificity, Sensitivity, Precision, Recall, and F score
+
+#preds is a vector of prediction probabilities
+classes = rep(0,nrow(class_dataset))
+classes[NB_Predictions2[,1]>0.5] = 1
+conf_matrix = table(class_dataset$result,classes)
+specificity=conf_matrix[1,1]/sum(conf_matrix[1,])
+specificity
+sensitivity = conf_matrix[2,2]/sum(conf_matrix[2,])
+sensitivity
+precision = conf_matrix[2,2]/sum(conf_matrix[,2])
+precision
+recall = conf_matrix[2,2]/sum(conf_matrix[2,])
+recall
+fscore = (2*precision*recall)/(precision + recall)
+f
+```
+
+
+
+
+
+
